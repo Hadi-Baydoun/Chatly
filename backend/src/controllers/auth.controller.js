@@ -2,6 +2,8 @@ import { generateToken } from "../lib/utils.js";
 import User from "../models/user.model.js";
 import bcrypt from "bcryptjs";
 import cloudinary from "../lib/cloudinary.js";
+import Message from "../models/message.model.js";
+import mongoose from "mongoose";
 
 export const signup = async (req, res) => {
   const { fullName, email, password } = req.body;
@@ -11,7 +13,9 @@ export const signup = async (req, res) => {
     }
 
     if (password.length < 6) {
-      return res.status(400).json({ message: "Password must be at least 6 characters" });
+      return res
+        .status(400)
+        .json({ message: "Password must be at least 6 characters" });
     }
 
     const user = await User.findOne({ email });
@@ -114,5 +118,120 @@ export const checkAuth = (req, res) => {
   } catch (error) {
     console.log("Error in checkAuth controller", error.message);
     res.status(500).json({ message: "Internal Server Error" });
+  }
+};
+
+export const searchUsers = async (req, res) => {
+  try {
+    const { email } = req.query;
+
+    if (!email) {
+      return res.status(400).json({ message: "Email is required" });
+    }
+
+    // Find users whose email matches the search term (excluding current user)
+    const users = await User.find({
+      email: { $regex: email, $options: "i" }, // Case-insensitive search
+      _id: { $ne: req.user._id }, // Exclude the current user
+    }).select("-password"); // Don't return password hashes
+
+    res.status(200).json(users);
+  } catch (error) {
+    console.log("Error in searchUsers controller", error.message);
+    res.status(500).json({ message: "Internal Server Error" });
+  }
+};
+
+export const getConversationUsers = async (req, res) => {
+  try {
+    const userId = new mongoose.Types.ObjectId(req.user._id);
+
+    const conversations = await Message.aggregate([
+      // Stage 1: Match messages involving the current user
+      {
+        $match: {
+          $or: [{ senderId: userId }, { receiverId: userId }],
+        },
+      },
+
+      // Stage 2: Sort by most recent first
+      {
+        $sort: { createdAt: -1 },
+      },
+
+      // Stage 3: Group by conversation partner
+      {
+        $group: {
+          _id: {
+            $cond: [{ $eq: ["$senderId", userId] }, "$receiverId", "$senderId"],
+          },
+          lastMessage: { $first: "$$ROOT" },
+          unreadCount: {
+            $sum: {
+              $cond: [
+                {
+                  $and: [
+                    { $eq: ["$receiverId", userId] },
+                    { $eq: ["$read", false] },
+                  ],
+                },
+                1,
+                0,
+              ],
+            },
+          },
+        },
+      },
+
+      // Stage 4: Lookup user details
+      {
+        $lookup: {
+          from: "users",
+          localField: "_id",
+          foreignField: "_id",
+          as: "user",
+        },
+      },
+
+      // Stage 5: Unwind the user array
+      {
+        $unwind: "$user",
+      },
+
+      // Stage 6: Project the final fields
+      {
+        $project: {
+          _id: "$user._id",
+          fullName: "$user.fullName",
+          email: "$user.email",
+          profilePic: "$user.profilePic",
+          lastMessage: {
+            text: "$lastMessage.text",
+            image: "$lastMessage.image",
+            createdAt: "$lastMessage.createdAt",
+            status: "$lastMessage.status",
+          },
+          unreadCount: 1,
+        },
+      },
+
+      // Stage 7: Sort by most recent conversation
+      {
+        $sort: { "lastMessage.createdAt": -1 },
+      },
+    ]);
+
+    res.status(200).json({
+      success: true,
+      conversations,
+      total: conversations.length,
+    });
+  } catch (error) {
+    console.error("Error in getConversationUsers:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to load conversations",
+      error: error.message,
+    });
   }
 };
